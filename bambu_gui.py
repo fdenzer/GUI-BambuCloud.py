@@ -19,13 +19,24 @@ class BambuStatusApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Bambu Lab Printer Status")
-        self.root.geometry("500x580")
+        self.root.geometry("500x700") # Increased height for two text areas
 
         load_dotenv()
 
         self.client = None
         self.login_requires_2fa = False
         self.active_session_loaded_from_keyring = False # Track if current session is from keyring
+
+        # --- In-memory cache for credentials ---
+        self.cached_email = None
+        self.cached_serial = None
+        self.cached_password = None
+        self.cached_token = None
+        self.cached_token_email = None # Email associated with the cached token
+        # Flag to indicate if keyring was successfully accessed for loading in this session,
+        # to prevent re-prompting if "Always Allow" was chosen.
+        self.keyring_load_attempted_in_session = False
+        # --- End of cache variables ---
 
         # Style
         style = ttk.Style()
@@ -73,33 +84,58 @@ class BambuStatusApp:
         self.action_button = ttk.Button(main_frame, text="Get Printer Status", command=self.handle_action)
         self.action_button.pack(pady=10, fill=tk.X)
 
-        # --- Status Display ---
-        status_frame = ttk.LabelFrame(main_frame, text="Status", padding="10 10 10 10")
-        status_frame.pack(expand=True, fill=tk.BOTH, pady=5)
+        # --- Log Display ---
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding="10 10 10 10")
+        log_frame.pack(expand=True, fill=tk.BOTH, pady=5)
 
-        self.status_text = scrolledtext.ScrolledText(status_frame, wrap=tk.WORD, height=15, state=tk.DISABLED)
-        self.status_text.pack(expand=True, fill=tk.BOTH)
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, height=8, state=tk.DISABLED)
+        self.log_text.pack(expand=True, fill=tk.BOTH)
+
+        # --- Status Display ---
+        status_display_frame = ttk.LabelFrame(main_frame, text="Printer Status", padding="10 10 10 10")
+        status_display_frame.pack(expand=True, fill=tk.BOTH, pady=5)
+
+        self.status_display_text = scrolledtext.ScrolledText(status_display_frame, wrap=tk.WORD, height=7, state=tk.DISABLED)
+        self.status_display_text.pack(expand=True, fill=tk.BOTH)
 
         creds_frame.grid_columnconfigure(1, weight=1)
 
         # Initial attempt to load session and populate fields
         self._try_load_session()
 
+    # Removed old _set_status method
 
-    def _set_status(self, message, is_error=False, append=False):
-        self.status_text.config(state=tk.NORMAL)
+    def _set_log_message(self, message, append=True, is_error=False):
+        self.log_text.config(state=tk.NORMAL)
         if not append:
-            self.status_text.delete(1.0, tk.END)
+            self.log_text.delete(1.0, tk.END)
 
-        # Basic tagging for color, can be expanded
         if is_error:
-            self.status_text.insert(tk.END, message + "\n", "error")
-            self.status_text.tag_config("error", foreground="red")
+            self.log_text.insert(tk.END, message + "\n", "error")
+            self.log_text.tag_config("error", foreground="red")
         else:
-            self.status_text.insert(tk.END, message + "\n")
+            self.log_text.insert(tk.END, message + "\n")
 
-        self.status_text.see(tk.END) # Scroll to the end
-        self.status_text.config(state=tk.DISABLED)
+        self.log_text.see(tk.END)  # Scroll to the end
+        self.log_text.config(state=tk.DISABLED)
+
+    def _set_status_display(self, message, is_error=False):
+        self.status_display_text.config(state=tk.NORMAL)
+        self.status_display_text.delete(1.0, tk.END) # Always clear before new status
+
+        if is_error: # Though typically printer status won't be an "error" in this text area, good to have
+            self.status_display_text.insert(tk.END, message + "\n", "error")
+            self.status_display_text.tag_config("error", foreground="red")
+        else:
+            self.status_display_text.insert(tk.END, message + "\n")
+
+        self.status_display_text.see(tk.END) # Scroll to the end
+        self.status_display_text.config(state=tk.DISABLED)
+
+    def _clear_status_display(self):
+        self.status_display_text.config(state=tk.NORMAL)
+        self.status_display_text.delete(1.0, tk.END)
+        self.status_display_text.config(state=tk.DISABLED)
 
     def handle_action(self):
         email = self.email_entry.get()
@@ -113,7 +149,8 @@ class BambuStatusApp:
 
         # Disable button during processing
         self.action_button.config(state=tk.DISABLED)
-        self._set_status("Processing...")
+        self._set_log_message("Processing...", append=False) # Clear log and show processing
+        self._clear_status_display() # Clear previous status
 
         # Run backend logic in a separate thread to avoid freezing the UI
         thread = threading.Thread(target=self._perform_action_thread, args=(email, password, serial, tfa_code))
@@ -129,48 +166,48 @@ class BambuStatusApp:
             if not self.client.access_token: # Not logged in yet
                 if self.login_requires_2fa: # This is a 2FA code submission attempt
                     if not tfa_code:
-                        self.root.after(0, lambda: self._set_status("2FA code is required. Please enter it and try again.", is_error=True))
+                        self.root.after(0, lambda: self._set_log_message("2FA code is required. Please enter it and try again.", is_error=True, append=True))
                         self.root.after(0, self._update_ui_for_2fa_input) # Ensure UI is set for 2FA
                         return
 
-                    self._set_status("Attempting login with 2FA code...", append=True)
+                    self.root.after(0, lambda: self._set_log_message("Attempting login with 2FA code...", append=True))
                     logged_in = self.client.login_with_2fa(tfa_code)
                     if logged_in:
                         self.login_requires_2fa = False # Clear flag after successful 2FA
                         self.root.after(0, self._update_ui_after_login)
-                        self._set_status("2FA Login successful.", append=True)
+                        self.root.after(0, lambda: self._set_log_message("2FA Login successful.", append=True))
                     else:
-                        self.root.after(0, lambda: self._set_status("2FA Login failed. Check code or credentials.", is_error=True, append=True))
+                        self.root.after(0, lambda: self._set_log_message("2FA Login failed. Check code or credentials.", is_error=True, append=True))
                         # Keep UI in 2FA mode for retry
                         self.root.after(0, self._update_ui_for_2fa_input)
                         return
                 else: # Initial login attempt (with password)
                     if not password: # Prompt if password wasn't entered (though CLI does this, GUI should ensure it's there or fail)
-                         self.root.after(0, lambda: self._set_status("Password is required for initial login.", is_error=True))
+                         self.root.after(0, lambda: self._set_log_message("Password is required for initial login.", is_error=True, append=True))
                          return
 
-                    self._set_status("Attempting login...", append=True)
+                    self.root.after(0, lambda: self._set_log_message("Attempting login...", append=True))
                     logged_in, needs_2fa_flag = self.client.login()
 
                     if logged_in:
                         self.login_requires_2fa = False
                         self.root.after(0, self._update_ui_after_login)
-                        self._set_status("Login successful.", append=True)
+                        self.root.after(0, lambda: self._set_log_message("Login successful.", append=True))
                     elif needs_2fa_flag:
                         self.login_requires_2fa = True
-                        self.root.after(0, lambda: self._set_status("Login requires 2FA. Please enter the code below and click 'Login with 2FA Code'.", append=True))
+                        self.root.after(0, lambda: self._set_log_message("Login requires 2FA. Please enter the code below and click 'Login with 2FA Code'.", append=True))
                         self.root.after(0, self._update_ui_for_2fa_input)
                         return # Stop here, wait for user to input 2FA and click again
                     else:
-                        self.root.after(0, lambda: self._set_status("Login failed. Check credentials.", is_error=True, append=True))
+                        self.root.after(0, lambda: self._set_log_message("Login failed. Check credentials.", is_error=True, append=True))
                         return
 
             # If we reach here, we are logged in (either initially or after 2FA)
             if self.client.access_token:
-                self._set_status(f"Fetching status for printer: {serial}...", append=True)
+                self.root.after(0, lambda: self._set_log_message(f"Fetching status for printer: {serial}...", append=True))
                 status = self.client.get_printer_status(serial)
                 if status:
-                    status_pretty = "\n--- Printer Status ---\n"
+                    status_pretty = "--- Printer Status ---\n" # Removed leading newline, handled by widget
                     status_pretty += f"  Device ID: {status.get('dev_id', 'N/A')}\n"
                     status_pretty += f"  Device Name: {status.get('dev_name', 'N/A')}\n"
                     status_pretty += f"  Online: {status.get('dev_online', 'N/A')}\n"
@@ -210,15 +247,17 @@ class BambuStatusApp:
                             status_pretty += f"  Prediction (s): {prediction} (error formatting time)\n"
                     else:
                         status_pretty += f"  Prediction (s): {status.get('prediction', 'N/A')}\n"
-                    self.root.after(0, lambda s=status_pretty: self._set_status(s, append=True))
+                    self.root.after(0, lambda s=status_pretty: self._set_status_display(s))
                 else:
-                    self.root.after(0, lambda: self._set_status(f"Could not retrieve printer status for {serial}.", is_error=True, append=True))
+                    self.root.after(0, lambda: self._set_log_message(f"Could not retrieve printer status for {serial}.", is_error=True, append=True))
+                    self.root.after(0, self._clear_status_display) # Clear status area on error
             else:
                 # This case should ideally be caught earlier
-                self.root.after(0, lambda: self._set_status("Not logged in. Please try logging in again.", is_error=True))
+                self.root.after(0, lambda: self._set_log_message("Not logged in. Please try logging in again.", is_error=True, append=True))
 
         except Exception as e:
-            self.root.after(0, lambda err=str(e): self._set_status(f"An unexpected error occurred: {err}", is_error=True, append=True))
+            self.root.after(0, lambda err=str(e): self._set_log_message(f"An unexpected error occurred: {err}", is_error=True, append=True))
+            self.root.after(0, self._clear_status_display) # Clear status area on error
         finally:
             # Re-enable button (must be done in the main thread)
             self.root.after(0, lambda: self.action_button.config(state=tk.NORMAL))
@@ -244,9 +283,10 @@ class BambuStatusApp:
 
         if session_loaded:
             self.password_entry.delete(0, tk.END) # Clear password field if session is active
-            self._set_status("Using saved session. Ready.", append=False)
+            self._set_log_message("Using saved session. Ready.", append=False) # Clear log and set message
         else: # Logged in with password/2FA
-            self._set_status("Login successful. Ready.", append=True)
+            # Log message for successful login is already handled in _perform_action_thread
+            # self._set_log_message("Login successful. Ready.", append=True)
             if self.save_creds_var.get(): # If saving creds, password field should be disabled post-login
                 self.password_entry.config(state=tk.DISABLED)
 
@@ -267,7 +307,8 @@ class BambuStatusApp:
         self.client = None # Clear client
         self.login_requires_2fa = False
         self.active_session_loaded_from_keyring = False
-        self._set_status("Please login.", append=False)
+        self._set_log_message("Please login.", append=False) # Clear log and set message
+        self._clear_status_display() # Clear status area
 
     # --- Credential Management Methods ---
     def _save_credentials_and_token(self, email, serial, password, token_to_save=None):
@@ -283,31 +324,85 @@ class BambuStatusApp:
 
             if token_to_save: # Always save token if one is provided (means successful login)
                 keyring.set_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI, token_to_save)
-                if email: keyring.set_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email", email)
+                self.cached_token = token_to_save # Update cache
+                if email:
+                    keyring.set_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email", email)
+                    self.cached_token_email = email # Update cache
+
+            # Update cache for other credentials if they were part of the save operation
+            if self.save_creds_var.get():
+                if email: self.cached_email = email
+                if serial: self.cached_serial = serial
+                if password: self.cached_password = password
+            else: # If save_creds was off, these specific items might have been deleted from keyring
+                  # but we only clear the main password from cache. Email/serial might still be useful if token exists.
+                self.cached_password = None
+                # Token cache is handled above. Email/Serial cache remains as is,
+                # as they might be unsaved but still used with a loaded token.
+
+            # After any save operation, the keyring has been interacted with,
+            # potentially changing its state from what was last loaded.
+            # Forcing a re-evaluation of keyring state if _load_credentials_and_token is called next.
+            # However, if we just saved, the cache should be up-to-date.
+            # Let's assume keyring_load_attempted_in_session means "cache is representative of one load attempt"
+            # and saving TO keyring means our cache is now the most current representation.
+            # self.keyring_load_attempted_in_session = True # It's already true if we loaded, and saving makes cache valid.
+
+
             return True
         except Exception as e:
-            self._set_status(f"Error saving data: {e}", is_error=True, append=True)
+            self.root.after(0, lambda: self._set_log_message(f"Error saving data to keyring: {e}", is_error=True, append=True))
             return False
 
     def _load_credentials_and_token(self):
+        if self.keyring_load_attempted_in_session:
+            return {
+                "email": self.cached_email,
+                "serial": self.cached_serial,
+                "password": self.cached_password,
+                "token": self.cached_token,
+                "token_email": self.cached_token_email
+            }
+
         try:
             email = keyring.get_password(KEYRING_SERVICE_NAME, KEY_EMAIL)
             serial = keyring.get_password(KEYRING_SERVICE_NAME, KEY_SERIAL)
             # Load password only if "save credentials" would have been true for it
-            # This means we check if email (primary key for saved creds) exists.
             password = keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD) if email else None
-
             token = keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
             token_email = keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
 
             # If a token exists with an associated email, and the main email field is empty or different,
-            # prefer the token's email. This handles cases where token is valid but user changed email field.
+            # prefer the token's email.
             if token and token_email and (not email or email != token_email):
-                email = token_email
+                self.cached_email = token_email # Update cache if we override email based on token
+            else:
+                self.cached_email = email
 
-            return {"email": email, "serial": serial, "password": password, "token": token, "token_email": token_email}
+            self.cached_serial = serial
+            self.cached_password = password # This will be None if email wasn't found, which is correct
+            self.cached_token = token
+            self.cached_token_email = token_email # Store original token_email from keyring
+
+            self.keyring_load_attempted_in_session = True # Mark that we've done the keyring access
+
+            return {
+                "email": self.cached_email, # Return the potentially token-adjusted email
+                "serial": self.cached_serial,
+                "password": self.cached_password,
+                "token": self.cached_token,
+                "token_email": self.cached_token_email # Return the original token_email
+            }
         except Exception as e:
-            self._set_status(f"Error loading saved data: {e}", is_error=True, append=True)
+            self._set_log_message(f"Error loading saved data from keyring: {e}", is_error=True, append=True)
+            # Even on error, mark as attempted to avoid re-prompting loops within the same session
+            self.keyring_load_attempted_in_session = True
+            # Clear cache on error to ensure no stale/partial data is used
+            self.cached_email = None
+            self.cached_serial = None
+            self.cached_password = None
+            self.cached_token = None
+            self.cached_token_email = None
             return {"email": None, "serial": None, "password": None, "token": None, "token_email": None}
 
     def _delete_credentials_and_token(self):
@@ -319,11 +414,20 @@ class BambuStatusApp:
             if keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
             if keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email"): keyring.delete_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
 
-            if self.client: self.client.access_token = None
+            if self.client: self.client.access_token = None # Clear token from active client
             self.active_session_loaded_from_keyring = False
+
+            # Clear the cache
+            self.cached_email = None
+            self.cached_serial = None
+            self.cached_password = None
+            self.cached_token = None
+            self.cached_token_email = None
+            self.keyring_load_attempted_in_session = False # Allow next load to hit keyring
+
             return True
         except Exception as e:
-            self._set_status(f"Error deleting saved data: {e}", is_error=True, append=True)
+            self.root.after(0, lambda: self._set_log_message(f"Error deleting saved data from keyring: {e}", is_error=True, append=True))
             return False
 
     def _try_load_session(self):
@@ -338,11 +442,14 @@ class BambuStatusApp:
             self.serial_entry.delete(0, tk.END); self.serial_entry.insert(0, serial)
             populated_from_keyring = True
 
-        # Set "Save Credentials" checkbox state based on whether a password was actually stored with the email
-        if email and keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD):
+        # Set "Save Credentials" checkbox state based on whether a password was loaded from keyring.
+        # data["password"] from _load_credentials_and_token() will be non-None if a password
+        # was successfully retrieved from keyring (which itself depends on email being present).
+        if data.get("email") and data.get("password"):
             self.save_creds_var.set(True)
-            if password: # password from _load_credentials_and_token already respects this
-                 self.password_entry.delete(0, tk.END); self.password_entry.insert(0, password)
+            # 'password' here is data.get("password") from the loaded credentials
+            if data.get("password"):
+                 self.password_entry.delete(0, tk.END); self.password_entry.insert(0, data.get("password"))
         else:
             self.save_creds_var.set(False)
             self.password_entry.delete(0, tk.END) # Clear field if not saving password
@@ -358,10 +465,11 @@ class BambuStatusApp:
             self.client = BambuClient(email=email, serial_number=serial if serial else "", access_token=token)
             self.active_session_loaded_from_keyring = True
             self._update_ui_after_login(session_loaded=True) # Disables fields, sets button text
-            self._set_status(f"Verifying saved session for {email}...", append=False)
+            self._set_log_message(f"Verifying saved session for {email}...", append=False) # Clear log and set message
+            self._clear_status_display() # Clear status area before auto-refresh
             self.handle_action() # Auto-click "Refresh Status" to validate token
         else:
-            self._reset_ui_for_login() # No token, ensure clean login state
+            self._reset_ui_for_login() # No token, ensure clean login state. This also calls _set_log_message & _clear_status_display
             if self.save_creds_var.get() and password: # If save is on and password was loaded
                 self.password_entry.config(state=tk.NORMAL) # Ensure it's editable initially
             elif not self.save_creds_var.get():
@@ -377,16 +485,20 @@ class BambuStatusApp:
             # We only definitively save credentials (specifically password) upon a successful login.
             # However, we can save email/serial now if they exist.
             # The act of checking the box means "I want to save these next time I log in successfully"
-            if email: keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
-            if serial: keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
+            if email:
+                keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
+                self.cached_email = email # Update cache
+            if serial:
+                keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
+                self.cached_serial = serial # Update cache
             # Password itself is only saved via _save_credentials_and_token after login.
             self.password_entry.config(state=tk.DISABLED if self.active_session_loaded_from_keyring else tk.NORMAL)
-            self._set_status("Credentials will be stored securely on next successful login.", append=True)
+            self._set_log_message("Credentials will be stored securely on next successful login.", append=True)
         else: # Box just got UNCHECKED
             if self._delete_credentials_and_token(): # Clear everything: creds and token
-                self._set_status("Saved credentials and session cleared.", append=True)
-            self.password_entry.delete(0, tk.END)
-            self._reset_ui_for_login() # Full UI reset to login state
+                self._set_log_message("Saved credentials and session cleared.", append=True)
+            # self.password_entry.delete(0, tk.END) # _reset_ui_for_login handles this if save_creds is off
+            self._reset_ui_for_login() # Full UI reset to login state. This also calls _set_log_message & _clear_status_display
 
     def _perform_action_thread(self, email, password, serial, tfa_code):
         try:
@@ -405,9 +517,10 @@ class BambuStatusApp:
                 if self.active_session_loaded_from_keyring and not self.client.access_token:
                     # A token loaded at app start was found invalid by an API call that BambuClient made.
                     # BambuClient already cleared its internal token. We need to clear from keyring.
-                    self.root.after(0, lambda: self._set_status("Saved session was invalid. Please login.", is_error=True, append=True))
+                    self.root.after(0, lambda: self._set_log_message("Saved session was invalid. Please login.", is_error=True, append=True))
                     self._delete_credentials_and_token() # Clear the bad token from keyring
                     self.active_session_loaded_from_keyring = False # Reset flag
+                    self.root.after(0, self._clear_status_display) # Clear status display
                     # UI should be reset for login by the end of this or by _reset_ui_for_login call
 
                 # Create a new client instance for a password-based login.
@@ -421,58 +534,59 @@ class BambuStatusApp:
 
                 if self.login_requires_2fa:
                     if not tfa_code:
-                        self.root.after(0, lambda: self._set_status("2FA code is required.", is_error=True, append=True))
+                        self.root.after(0, lambda: self._set_log_message("2FA code is required.", is_error=True, append=True))
                         self.root.after(0, self._update_ui_for_2fa_input)
                         return
-                    self.root.after(0, lambda: self._set_status("Attempting 2FA login...", append=True))
+                    self.root.after(0, lambda: self._set_log_message("Attempting 2FA login...", append=True))
                     logged_in = self.client.login_with_2fa(tfa_code)
                     if logged_in:
                         self.login_requires_2fa = False
                         self._save_credentials_and_token(email, serial, password, self.client.access_token)
                         self.root.after(0, lambda: self._update_ui_after_login(session_loaded=False))
+                        # Success message for 2FA login will be handled by _update_ui_after_login or a subsequent status fetch
                     else:
-                        self.root.after(0, lambda: self._set_status("2FA login failed.", is_error=True, append=True))
+                        self.root.after(0, lambda: self._set_log_message("2FA login failed.", is_error=True, append=True))
                         self.root.after(0, self._update_ui_for_2fa_input) # Stay in 2FA mode
                         return
                 else: # Standard password login
                     if not self.client.password: # Password should have been passed to BambuClient constructor
-                        self.root.after(0, lambda: self._set_status("Password is required for login.", is_error=True))
+                        self.root.after(0, lambda: self._set_log_message("Password is required for login.", is_error=True, append=True))
                         self.root.after(0, self._reset_ui_for_login)
                         return
 
-                    self.root.after(0, lambda: self._set_status("Attempting login...", append=True))
+                    self.root.after(0, lambda: self._set_log_message("Attempting login...", append=True))
                     logged_in, needs_2fa_flag = self.client.login() # Uses password from client instance
                     if logged_in:
                         self.login_requires_2fa = False
                         self._save_credentials_and_token(email, serial, self.client.password, self.client.access_token)
                         self.root.after(0, lambda: self._update_ui_after_login(session_loaded=False))
+                        self.root.after(0, lambda: self._set_log_message("Login successful.", append=True))
                     elif needs_2fa_flag:
                         self.login_requires_2fa = True
-                        self.root.after(0, lambda: self._set_status("Login requires 2FA. Enter code.", append=True))
+                        self.root.after(0, lambda: self._set_log_message("Login requires 2FA. Enter code.", append=True))
                         self.root.after(0, self._update_ui_for_2fa_input)
                         return
                     else: # Login failed (non-2FA)
-                        self.root.after(0, lambda: self._set_status("Login failed. Check credentials.", is_error=True, append=True))
-                        self.root.after(0, self._reset_ui_for_login)
+                        self.root.after(0, lambda: self._set_log_message("Login failed. Check credentials.", is_error=True, append=True))
+                        self.root.after(0, self._reset_ui_for_login) # This will also clear status display
                         return
 
             # --- API Call (if token exists) ---
             if self.client.access_token:
-                self.root.after(0, lambda: self._set_status(f"Fetching status for {serial}...", append=True))
+                self.root.after(0, lambda: self._set_log_message(f"Fetching status for {serial}...", append=True))
                 status = self.client.get_printer_status(serial)
 
                 if not self.client.access_token and self.active_session_loaded_from_keyring:
                     # Token became invalid DURING the get_printer_status call.
                     # BambuClient's _make_request detected 401 and cleared its internal token.
-                    self.root.after(0, lambda: self._set_status("Session expired during fetch. Please login.", is_error=True, append=True))
+                    self.root.after(0, lambda: self._set_log_message("Session expired during fetch. Please login.", is_error=True, append=True))
                     self._delete_credentials_and_token() # Clear from keyring
                     self.active_session_loaded_from_keyring = False
-                    self.root.after(0, self._reset_ui_for_login)
+                    self.root.after(0, self._reset_ui_for_login) # This will also clear status display
                     return # Stop processing
 
                 if status:
-                    # ... (status display logic - unchanged)
-                    status_pretty = "\n--- Printer Status ---\n"
+                    status_pretty = "--- Printer Status ---\n" # Removed leading newline
                     status_pretty += f"  Device ID: {status.get('dev_id', 'N/A')}\n"
                     status_pretty += f"  Device Name: {status.get('dev_name', 'N/A')}\n"
                     status_pretty += f"  Online: {status.get('dev_online', 'N/A')}\n"
@@ -507,19 +621,22 @@ class BambuStatusApp:
                             status_pretty += f"  Prediction (s): {prediction} (error formatting time: {e})\n"
                     else:
                         status_pretty += f"  Prediction (s): {status.get('prediction', 'N/A')}\n"
-                    self.root.after(0, lambda s=status_pretty: self._set_status(s, append=True))
+                    self.root.after(0, lambda s=status_pretty: self._set_status_display(s))
+                    self.root.after(0, lambda: self._set_log_message("Printer status updated.", append=True))
+
 
                     if self.active_session_loaded_from_keyring: # UI update if token from keyring was used successfully
                          self.root.after(0, lambda: self._update_ui_after_login(session_loaded=True))
                 else: # Status is None or an error structure not caught as 401 by BambuClient
-                    self.root.after(0, lambda: self._set_status(f"Could not retrieve printer status for {serial}. See console.", is_error=True, append=True))
+                    self.root.after(0, lambda: self._set_log_message(f"Could not retrieve printer status for {serial}. See console.", is_error=True, append=True))
+                    self.root.after(0, self._clear_status_display) # Clear status area
             else: # Should be caught by login logic if token is missing
-                 self.root.after(0, lambda: self._set_status("Not logged in. Please login.", is_error=True))
-                 self.root.after(0, self._reset_ui_for_login)
+                 self.root.after(0, lambda: self._set_log_message("Not logged in. Please login.", is_error=True, append=True))
+                 self.root.after(0, self._reset_ui_for_login) # This will also clear status display
 
         except Exception as e:
-            self.root.after(0, lambda err=str(e): self._set_status(f"Unexpected error: {err}", is_error=True, append=True))
-            self.root.after(0, self._reset_ui_for_login) # Ensure UI is reset
+            self.root.after(0, lambda err=str(e): self._set_log_message(f"Unexpected error: {err}", is_error=True, append=True))
+            self.root.after(0, self._reset_ui_for_login) # Ensure UI is reset, this will also clear status display
         finally:
             self.root.after(0, lambda: self.action_button.config(state=tk.NORMAL))
 
