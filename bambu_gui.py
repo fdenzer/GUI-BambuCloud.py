@@ -4,14 +4,15 @@ import threading # For running backend tasks without freezing UI
 from bambu_cli import BambuClient # Assuming bambu_cli.py is in the same directory or PYTHONPATH
 import os
 from dotenv import load_dotenv
-import keyring # For saving credentials
+# import keyring # Replaced by KeychainManager
+from keychain_manager import KeychainManager # Import the new manager
 
 # --- Keyring Constants ---
-KEYRING_SERVICE_NAME = "BambuStudioHelper_GUI"
-KEY_EMAIL = "user_email"
-KEY_SERIAL = "printer_serial"
-KEY_PASSWORD = "user_password"
-KEY_ACCESS_TOKEN_GUI = "gui_access_token" # Specific key for GUI's access token
+# KEYRING_SERVICE_NAME = "BambuStudioHelper_GUI" # Now handled by KeychainManager
+# KEY_EMAIL = "user_email" # Now handled by KeychainManager
+# KEY_SERIAL = "printer_serial" # Now handled by KeychainManager
+# KEY_PASSWORD = "user_password" # Now handled by KeychainManager
+# KEY_ACCESS_TOKEN_GUI = "gui_access_token" # Now handled by KeychainManager
 
 
 class BambuStatusApp:
@@ -21,20 +22,20 @@ class BambuStatusApp:
         self.root.geometry("500x700") # Increased height for two text areas
 
         load_dotenv()
-
+        self.keychain_manager = KeychainManager() # Instantiate the manager
         self.client = None
         self.login_requires_2fa = False
         self.active_session_loaded_from_keyring = False # Track if current session is from keyring
 
-        # --- In-memory cache for credentials ---
+        # --- In-memory cache for credentials (still useful for UI state) ---
         self.cached_email = None
         self.cached_serial = None
-        self.cached_password = None
-        self.cached_token = None
-        self.cached_token_email = None # Email associated with the cached token
-        # Flag to indicate if keyring was successfully accessed for loading in this session,
-        # to prevent re-prompting if "Always Allow" was chosen.
-        self.keyring_load_attempted_in_session = False
+        self.cached_password = None # Password from "save credentials"
+        self.cached_token = None # Token loaded for the session
+        self.cached_token_email = None # Email associated with the loaded token
+
+        # This flag is less about "keyring access attempted" and more about "initial load done"
+        self.initial_keychain_load_done = False
         # --- End of cache variables ---
 
         # Style
@@ -309,52 +310,47 @@ class BambuStatusApp:
         self._set_log_message("Please login.", append=False) # Clear log and set message
         self._clear_status_display() # Clear status area
 
-    # --- Credential Management Methods ---
-    def _save_credentials_and_token(self, email, serial, password, token_to_save=None):
+    # --- Credential Management Methods using KeychainManager ---
+    def _handle_save_creds_and_token(self, email, serial, password_to_save, token_to_save=None):
+        """
+        Saves GUI credentials (if 'Save Credentials' is checked) and always saves the token
+        using KeychainManager. Updates local cache.
+        """
         try:
             if self.save_creds_var.get():
-                if email: keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
-                if serial: keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
-                if password: keyring.set_password(KEYRING_SERVICE_NAME, KEY_PASSWORD, password)
-            else: # If save_creds is off, ensure they are deleted (token handled separately)
-                if keyring.get_password(KEYRING_SERVICE_NAME, KEY_EMAIL): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_EMAIL)
-                if keyring.get_password(KEYRING_SERVICE_NAME, KEY_SERIAL): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_SERIAL)
-                if keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_PASSWORD)
+                self.keychain_manager.save_gui_credentials(email, password_to_save, serial)
+                self.cached_email = email
+                self.cached_password = password_to_save # Only cache password if saved
+                self.cached_serial = serial
+            else:
+                # If "save" is off, ensure GUI creds (especially password) are cleared from keychain
+                # Email/serial might persist if they were saved independently or by a previous "save" state.
+                # A more aggressive clear might be self.keychain_manager.clear_gui_credentials(),
+                # but that would also remove email/serial which might be wanted for token association.
+                # For now, just ensure password is not saved if box is unchecked.
+                gui_creds = self.keychain_manager.load_gui_credentials()
+                self.keychain_manager.save_gui_credentials(
+                    email=gui_creds.get("email"), # Keep existing email
+                    password=None, # Explicitly clear password
+                    serial=gui_creds.get("serial") # Keep existing serial
+                )
+                self.cached_password = None # Clear cached password
 
-            if token_to_save: # Always save token if one is provided (means successful login)
-                keyring.set_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI, token_to_save)
-                self.cached_token = token_to_save # Update cache
-                if email:
-                    keyring.set_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email", email)
-                    self.cached_token_email = email # Update cache
-
-            # Update cache for other credentials if they were part of the save operation
-            if self.save_creds_var.get():
-                if email: self.cached_email = email
-                if serial: self.cached_serial = serial
-                if password: self.cached_password = password
-            else: # If save_creds was off, these specific items might have been deleted from keyring
-                  # but we only clear the main password from cache. Email/serial might still be useful if token exists.
-                self.cached_password = None
-                # Token cache is handled above. Email/Serial cache remains as is,
-                # as they might be unsaved but still used with a loaded token.
-
-            # After any save operation, the keyring has been interacted with,
-            # potentially changing its state from what was last loaded.
-            # Forcing a re-evaluation of keyring state if _load_credentials_and_token is called next.
-            # However, if we just saved, the cache should be up-to-date.
-            # Let's assume keyring_load_attempted_in_session means "cache is representative of one load attempt"
-            # and saving TO keyring means our cache is now the most current representation.
-            # self.keyring_load_attempted_in_session = True # It's already true if we loaded, and saving makes cache valid.
-
-
+            if token_to_save and email:
+                self.keychain_manager.save_token(email, token_to_save)
+                self.cached_token = token_to_save
+                self.cached_token_email = email
             return True
         except Exception as e:
-            self.root.after(0, lambda: self._set_log_message(f"Error saving data to keyring: {e}", is_error=True, append=True))
+            self.root.after(0, lambda: self._set_log_message(f"Error saving data via KeychainManager: {e}", is_error=True, append=True))
             return False
 
-    def _load_credentials_and_token(self):
-        if self.keyring_load_attempted_in_session:
+    def _load_data_from_keychain(self):
+        """
+        Loads GUI credentials and the last used token using KeychainManager.
+        Populates the cache.
+        """
+        if self.initial_keychain_load_done: # Only load from keychain once per session unless forced
             return {
                 "email": self.cached_email,
                 "serial": self.cached_serial,
@@ -364,39 +360,37 @@ class BambuStatusApp:
             }
 
         try:
-            email = keyring.get_password(KEYRING_SERVICE_NAME, KEY_EMAIL)
-            serial = keyring.get_password(KEYRING_SERVICE_NAME, KEY_SERIAL)
-            # Load password only if "save credentials" would have been true for it
-            password = keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD) if email else None
-            token = keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
-            token_email = keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
+            gui_creds = self.keychain_manager.load_gui_credentials()
+            loaded_email = gui_creds.get("email")
+            loaded_password = gui_creds.get("password")
+            loaded_serial = gui_creds.get("serial")
 
-            # If a token exists with an associated email, and the main email field is empty or different,
-            # prefer the token's email.
-            if token and token_email and (not email or email != token_email):
-                self.cached_email = token_email # Update cache if we override email based on token
-            else:
-                self.cached_email = email
+            # Attempt to load a token. Try last known token user first, then GUI email.
+            token_email_to_try = self.keychain_manager.get_last_saved_token_email() or loaded_email
+            loaded_token = None
+            if token_email_to_try:
+                loaded_token = self.keychain_manager.load_token(token_email_to_try)
 
-            self.cached_serial = serial
-            self.cached_password = password # This will be None if email wasn't found, which is correct
-            self.cached_token = token
-            self.cached_token_email = token_email # Store original token_email from keyring
+            # Update cache
+            self.cached_email = loaded_email
+            self.cached_password = loaded_password # Will be None if not saved
+            self.cached_serial = loaded_serial
+            self.cached_token = loaded_token
+            self.cached_token_email = token_email_to_try if loaded_token else None
 
-            self.keyring_load_attempted_in_session = True # Mark that we've done the keyring access
+            self.initial_keychain_load_done = True
 
             return {
-                "email": self.cached_email, # Return the potentially token-adjusted email
+                "email": self.cached_email,
                 "serial": self.cached_serial,
                 "password": self.cached_password,
                 "token": self.cached_token,
-                "token_email": self.cached_token_email # Return the original token_email
+                "token_email": self.cached_token_email
             }
         except Exception as e:
-            self._set_log_message(f"Error loading saved data from keyring: {e}", is_error=True, append=True)
-            # Even on error, mark as attempted to avoid re-prompting loops within the same session
-            self.keyring_load_attempted_in_session = True
-            # Clear cache on error to ensure no stale/partial data is used
+            self.root.after(0, lambda: self._set_log_message(f"Error loading data via KeychainManager: {e}", is_error=True, append=True))
+            self.initial_keychain_load_done = True # Mark as done even on error to avoid loops
+            # Clear cache on error
             self.cached_email = None
             self.cached_serial = None
             self.cached_password = None
@@ -404,132 +398,158 @@ class BambuStatusApp:
             self.cached_token_email = None
             return {"email": None, "serial": None, "password": None, "token": None, "token_email": None}
 
-    def _delete_credentials_and_token(self):
+    def _handle_clear_creds_and_token(self):
+        """
+        Clears GUI credentials and the current user's token (if email known)
+        using KeychainManager. Resets relevant parts of the cache.
+        """
         try:
-            if keyring.get_password(KEYRING_SERVICE_NAME, KEY_EMAIL): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_EMAIL)
-            if keyring.get_password(KEYRING_SERVICE_NAME, KEY_SERIAL): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_SERIAL)
-            if keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_PASSWORD)
+            current_email_in_field = self.email_entry.get() # Email currently in the UI field
 
-            if keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
-            if keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email"): keyring.delete_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
+            # Clear GUI credentials (general, not tied to a specific email by KeychainManager's design)
+            self.keychain_manager.clear_gui_credentials()
 
-            if self.client: self.client.access_token = None # Clear token from active client
+            # Clear token for the email that was active or last known for a token
+            email_to_clear_token_for = self.cached_token_email or current_email_in_field
+            if email_to_clear_token_for:
+                self.keychain_manager.clear_token(email_to_clear_token_for)
+
+            if self.client: self.client.access_token = None
             self.active_session_loaded_from_keyring = False
 
-            # Clear the cache
-            self.cached_email = None
-            self.cached_serial = None
-            self.cached_password = None
+            # Reset cache related to saved state
+            self.cached_email = None # GUI creds are cleared, so this should be too
+            self.cached_serial = None # ditto
+            self.cached_password = None # ditto
             self.cached_token = None
             self.cached_token_email = None
-            self.keyring_load_attempted_in_session = False # Allow next load to hit keyring
+            # self.initial_keychain_load_done = False # Allow re-load on next app start, not during this action
 
             return True
         except Exception as e:
-            self.root.after(0, lambda: self._set_log_message(f"Error deleting saved data from keyring: {e}", is_error=True, append=True))
+            self.root.after(0, lambda: self._set_log_message(f"Error deleting data via KeychainManager: {e}", is_error=True, append=True))
             return False
 
     def _try_load_session(self):
-        data = self._load_credentials_and_token()
-        email, serial, password, token = data.get("email"), data.get("serial"), data.get("password"), data.get("token")
+        """Populates UI fields based on data loaded from KeychainManager."""
+        data = self._load_data_from_keychain()
 
-        populated_from_keyring = False
-        if email:
-            self.email_entry.delete(0, tk.END); self.email_entry.insert(0, email)
-            populated_from_keyring = True
-        if serial:
-            self.serial_entry.delete(0, tk.END); self.serial_entry.insert(0, serial)
-            populated_from_keyring = True
+        # Use token_email for client if available, otherwise GUI email
+        # This prioritizes the email associated with an active session token.
+        email_for_client = data.get("token_email") or data.get("email")
+        serial_for_client = data.get("serial")
+        token_for_client = data.get("token")
+        password_from_keychain = data.get("password") # This is the saved GUI password
 
-        # Set "Save Credentials" checkbox state based on whether a password was loaded from keyring.
-        # data["password"] from _load_credentials_and_token() will be non-None if a password
-        # was successfully retrieved from keyring (which itself depends on email being present).
-        if data.get("email") and data.get("password"):
+        populated_from_keychain = False
+        if data.get("email"): # GUI saved email
+            self.email_entry.delete(0, tk.END); self.email_entry.insert(0, data.get("email"))
+            populated_from_keychain = True
+        if data.get("serial"): # GUI saved serial
+            self.serial_entry.delete(0, tk.END); self.serial_entry.insert(0, data.get("serial"))
+            populated_from_keychain = True
+
+        # Set "Save Credentials" checkbox and password field based on loaded GUI password
+        if password_from_keychain and data.get("email"): # Password was saved for this email
             self.save_creds_var.set(True)
-            # 'password' here is data.get("password") from the loaded credentials
-            if data.get("password"):
-                 self.password_entry.delete(0, tk.END); self.password_entry.insert(0, data.get("password"))
+            self.password_entry.delete(0, tk.END); self.password_entry.insert(0, password_from_keychain)
         else:
             self.save_creds_var.set(False)
-            self.password_entry.delete(0, tk.END) # Clear field if not saving password
+            self.password_entry.delete(0, tk.END)
 
-        if not populated_from_keyring: # Fallback to .env if nothing from keyring for email/serial
+        if not populated_from_keychain: # Fallback to .env if nothing from keychain for email/serial
             env_email = os.getenv("username", "")
             env_serial = os.getenv("printer_sn", "")
             if not self.email_entry.get() and env_email : self.email_entry.insert(0, env_email)
             if not self.serial_entry.get() and env_serial : self.serial_entry.insert(0, env_serial)
-            # .env doesn't influence save_creds_var or password field for GUI
 
-        if token and email: # A token exists and we have an email for the client
-            self.client = BambuClient(email=email, serial_number=serial if serial else "", access_token=token)
+        if token_for_client and email_for_client:
+            # If the email field was populated by GUI creds and differs from token_email,
+            # update the email field to match the token's email for consistency.
+            if self.email_entry.get() != email_for_client:
+                self.email_entry.delete(0, tk.END); self.email_entry.insert(0, email_for_client)
+
+            self.client = BambuClient(email=email_for_client,
+                                      serial_number=serial_for_client if serial_for_client else "",
+                                      access_token=token_for_client)
             self.active_session_loaded_from_keyring = True
-            self._update_ui_after_login(session_loaded=True) # Disables fields, sets button text
-            self._set_log_message(f"Verifying saved session for {email}...", append=False) # Clear log and set message
-            self._clear_status_display() # Clear status area before auto-refresh
-            self.handle_action() # Auto-click "Refresh Status" to validate token
+            self._update_ui_after_login(session_loaded=True)
+            self._set_log_message(f"Verifying saved session for {email_for_client}...", append=False)
+            self._clear_status_display()
+            self.handle_action() # Auto-refresh
         else:
-            self._reset_ui_for_login() # No token, ensure clean login state. This also calls _set_log_message & _clear_status_display
-            if self.save_creds_var.get() and password: # If save is on and password was loaded
-                self.password_entry.config(state=tk.NORMAL) # Ensure it's editable initially
+            self._reset_ui_for_login()
+            # If save_creds_var is true (meaning password was loaded) ensure field is editable initially
+            if self.save_creds_var.get() and self.password_entry.get():
+                self.password_entry.config(state=tk.NORMAL)
             elif not self.save_creds_var.get():
-                 self.password_entry.delete(0, tk.END)
+                self.password_entry.delete(0, tk.END)
 
 
     def on_save_creds_toggled(self):
         email = self.email_entry.get()
         serial = self.serial_entry.get()
-        password_val = self.password_entry.get() # Care: might be empty
+        # Password from field is only relevant if we are *saving* it now.
+        # If unchecking, we clear based on what's in keychain.
 
         if self.save_creds_var.get(): # Box just got CHECKED
-            # We only definitively save credentials (specifically password) upon a successful login.
-            # However, we can save email/serial now if they exist.
-            # The act of checking the box means "I want to save these next time I log in successfully"
-            if email:
-                keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
-                self.cached_email = email # Update cache
-            if serial:
-                keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
-                self.cached_serial = serial # Update cache
-            # Password itself is only saved via _save_credentials_and_token after login.
+            # This action primarily signals intent. Actual saving of password happens on successful login.
+            # We can save email/serial now if they are not empty.
+            # KeychainManager().save_gui_credentials handles this.
+            # No direct keychain interaction here needed, _handle_save_creds_and_token will do it.
+            self.keychain_manager.save_gui_credentials(email=email or None, # Save if exists
+                                                       password=None, # Don't save password yet
+                                                       serial=serial or None) # Save if exists
+            if email: self.cached_email = email
+            if serial: self.cached_serial = serial
+
             self.password_entry.config(state=tk.DISABLED if self.active_session_loaded_from_keyring else tk.NORMAL)
-            self._set_log_message("Credentials will be stored securely on next successful login.", append=True)
+            self._set_log_message("Credentials (email/serial updated if entered, password will be stored on next successful login).", append=True)
         else: # Box just got UNCHECKED
-            if self._delete_credentials_and_token(): # Clear everything: creds and token
-                self._set_log_message("Saved credentials and session cleared.", append=True)
-            # self.password_entry.delete(0, tk.END) # _reset_ui_for_login handles this if save_creds is off
-            self._reset_ui_for_login() # Full UI reset to login state. This also calls _set_log_message & _clear_status_display
+            # Clear saved GUI credentials (especially password) and any active token for the current user.
+            if self._handle_clear_creds_and_token():
+                self._set_log_message("Saved credentials and current user session cleared.", append=True)
+            self._reset_ui_for_login() # Full UI reset
 
     def _perform_action_thread(self, email, password, serial, tfa_code):
         try:
+            current_token_email = self.cached_token_email # Email associated with any loaded token
+            current_token = self.cached_token
+
             # --- Client Initialization & Token Validation ---
-            # If a session was loaded from keyring (self.active_session_loaded_from_keyring is true)
-            # then self.client is already initialized with that token.
-            # The BambuClient's _make_request will handle if that token is bad.
-
-            if not self.client or self.client.email != email or \
+            # Condition for new client:
+            # 1. No client exists OR
+            # 2. Email in form differs from client's current email OR
+            # 3. A session was supposedly loaded, but the client's token is now gone (e.g., invalidated by BambuClient)
+            if not self.client or \
+               self.client.email != email or \
                (self.active_session_loaded_from_keyring and not self.client.access_token):
-                # This block handles:
-                # 1. Initial client creation if no session was loaded.
-                # 2. Client re-creation if email changed in the form.
-                # 3. Client re-creation if a keyring-loaded session was just invalidated.
 
-                if self.active_session_loaded_from_keyring and not self.client.access_token:
-                    # A token loaded at app start was found invalid by an API call that BambuClient made.
-                    # BambuClient already cleared its internal token. We need to clear from keyring.
+                if self.active_session_loaded_from_keyring and not self.client.access_token :
+                    # Loaded session token was invalidated by BambuClient. Clear it from keychain.
                     self.root.after(0, lambda: self._set_log_message("Saved session was invalid. Please login.", is_error=True, append=True))
-                    self._delete_credentials_and_token() # Clear the bad token from keyring
-                    self.active_session_loaded_from_keyring = False # Reset flag
-                    self.root.after(0, self._clear_status_display) # Clear status display
-                    # UI should be reset for login by the end of this or by _reset_ui_for_login call
+                    if current_token_email: # Ensure we have an email to target for token clearing
+                        self.keychain_manager.clear_token(current_token_email)
+                    # Also clear general GUI credentials as a precaution or if they were tied to this failed session concept
+                    # self.keychain_manager.clear_gui_credentials() # This might be too broad if user has other GUI settings
+                    self.active_session_loaded_from_keyring = False
+                    self.cached_token = None # Clear cached token
+                    self.cached_token_email = None
+                    # UI should be reset for login by _reset_ui_for_login called later if login fails
 
-                # Create a new client instance for a password-based login.
-                # The password used by client.login() will be what's in self.client.password.
-                self.client = BambuClient(email=email, serial_number=serial, password=password)
-                self.login_requires_2fa = False # Reset 2FA for new attempt.
+                # Initialize client:
+                # If there's a cached token for *this specific email* and it matches current_token, use it.
+                # This handles the case where the app starts, loads a token, and user hits "refresh".
+                token_to_init_client = None
+                if email == current_token_email and current_token:
+                    token_to_init_client = current_token
 
-            # --- Login (if no valid token) ---
+                self.client = BambuClient(email=email, serial_number=serial, password=password, access_token=token_to_init_client)
+                self.login_requires_2fa = False # Reset 2FA for new client/attempt.
+
+            # --- Login (if no valid token on client) ---
             if not self.client.access_token:
-                self.active_session_loaded_from_keyring = False # Ensure this is false if we're about to login
+                self.active_session_loaded_from_keyring = False # If we are here, any prior loaded session is not being used
 
                 if self.login_requires_2fa:
                     if not tfa_code:
@@ -540,24 +560,24 @@ class BambuStatusApp:
                     logged_in = self.client.login_with_2fa(tfa_code)
                     if logged_in:
                         self.login_requires_2fa = False
-                        self._save_credentials_and_token(email, serial, password, self.client.access_token)
+                        # Save token and potentially credentials (password if "save" is checked)
+                        self._handle_save_creds_and_token(email, serial, password, self.client.access_token)
                         self.root.after(0, lambda: self._update_ui_after_login(session_loaded=False))
-                        # Success message for 2FA login will be handled by _update_ui_after_login or a subsequent status fetch
                     else:
                         self.root.after(0, lambda: self._set_log_message("2FA login failed.", is_error=True, append=True))
                         self.root.after(0, self._update_ui_for_2fa_input) # Stay in 2FA mode
                         return
                 else: # Standard password login
-                    if not self.client.password: # Password should have been passed to BambuClient constructor
+                    if not self.client.password: # Password from UI field, passed to BambuClient
                         self.root.after(0, lambda: self._set_log_message("Password is required for login.", is_error=True, append=True))
                         self.root.after(0, self._reset_ui_for_login)
                         return
 
                     self.root.after(0, lambda: self._set_log_message("Attempting login...", append=True))
-                    logged_in, needs_2fa_flag = self.client.login() # Uses password from client instance
+                    logged_in, needs_2fa_flag = self.client.login()
                     if logged_in:
                         self.login_requires_2fa = False
-                        self._save_credentials_and_token(email, serial, self.client.password, self.client.access_token)
+                        self._handle_save_creds_and_token(email, serial, self.client.password, self.client.access_token)
                         self.root.after(0, lambda: self._update_ui_after_login(session_loaded=False))
                         self.root.after(0, lambda: self._set_log_message("Login successful.", append=True))
                     elif needs_2fa_flag:
@@ -567,25 +587,31 @@ class BambuStatusApp:
                         return
                     else: # Login failed (non-2FA)
                         self.root.after(0, lambda: self._set_log_message("Login failed. Check credentials.", is_error=True, append=True))
-                        self.root.after(0, self._reset_ui_for_login) # This will also clear status display
+                        self.root.after(0, self._reset_ui_for_login)
                         return
 
-            # --- API Call (if token exists) ---
+            # --- API Call (if token exists on client) ---
             if self.client.access_token:
                 self.root.after(0, lambda: self._set_log_message(f"Fetching status for {serial}...", append=True))
-                status = self.client.get_printer_status(serial)
+                status = self.client.get_printer_status(serial) # This uses client.access_token
 
-                if not self.client.access_token and self.active_session_loaded_from_keyring:
-                    # Token became invalid DURING the get_printer_status call.
-                    # BambuClient's _make_request detected 401 and cleared its internal token.
-                    self.root.after(0, lambda: self._set_log_message("Session expired during fetch. Please login.", is_error=True, append=True))
-                    self._delete_credentials_and_token() # Clear from keyring
+                # After API call, check if token was invalidated by BambuClient (e.g. 401 error)
+                if not self.client.access_token and (self.active_session_loaded_from_keyring or email == self.cached_token_email):
+                    # Token became invalid. BambuClient cleared its internal token.
+                    # Clear from keychain and cache.
+                    self.root.after(0, lambda: self._set_log_message("Session expired or token invalid. Please login.", is_error=True, append=True))
+                    email_of_invalid_token = self.cached_token_email or email # Prefer cached, fallback to current form email
+                    if email_of_invalid_token:
+                        self.keychain_manager.clear_token(email_of_invalid_token)
+
                     self.active_session_loaded_from_keyring = False
-                    self.root.after(0, self._reset_ui_for_login) # This will also clear status display
+                    self.cached_token = None
+                    self.cached_token_email = None
+                    self.root.after(0, self._reset_ui_for_login)
                     return # Stop processing
 
                 if status:
-                    status_pretty = "--- Printer Status ---\n" # Removed leading newline
+                    status_pretty = "--- Printer Status ---\n"
                     status_pretty += f"  Device ID: {status.get('dev_id', 'N/A')}\n"
                     status_pretty += f"  Device Name: {status.get('dev_name', 'N/A')}\n"
                     status_pretty += f"  Online: {status.get('dev_online', 'N/A')}\n"
