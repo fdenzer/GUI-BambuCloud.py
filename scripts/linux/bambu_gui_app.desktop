@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Bambu Cloud Status
+Exec=bambu_gui_app
+Categories=Utility;
+Comment=Monitor and manage your Bambu Lab 3D printer status
+Terminal=false
+StartupWMClass=bambu-gui-app
+Icon=bambu_icon
