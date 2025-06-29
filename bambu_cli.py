@@ -2,12 +2,13 @@ import requests
 import argparse
 import json
 import getpass
-import keyring # Added for session token storage
+# import keyring # Replaced by KeychainManager
+from keychain_manager import KeychainManager # Import the new manager
 
 API_BASE_URL = "https://api.bambulab.com"
-KEYRING_SERVICE_NAME_CLI = "BambuStudioHelper_CLI"
-KEY_ACCESS_TOKEN = "access_token"
-KEY_USER_EMAIL = "user_email" # To associate token with user
+# KEYRING_SERVICE_NAME_CLI = "BambuStudioHelper_CLI" # Now defined in KeychainManager
+# KEY_ACCESS_TOKEN = "access_token" # Now defined in KeychainManager
+# KEY_USER_EMAIL = "user_email" # Now defined in KeychainManager
 
 class BambuClient:
     def __init__(self, email, serial_number, password=None, access_token=None):
@@ -16,53 +17,52 @@ class BambuClient:
         self.serial_number = serial_number
         self.access_token = access_token # Allow passing token directly
         self.needs_2fa = False
+        self.keychain_manager = KeychainManager() # Instantiate the manager
 
         if not self.access_token: # Only load from keyring if not provided directly
             self._load_token()
 
     def _load_token(self):
-        """Loads access token from keyring if available for the current email."""
-        if self.email: # Only load if email is provided for association
+        """Loads access token from keychain_manager if available for the current email."""
+        if self.email:
             try:
-                # For CLI, token is associated with an email.
-                # This check ensures we load the token for the correct user if multiple were somehow stored
-                # (though keyring typically manages this per-user contextually by OS user).
-                stored_email_for_token = keyring.get_password(KEYRING_SERVICE_NAME_CLI, KEY_USER_EMAIL)
-                if stored_email_for_token == self.email:
-                    token = keyring.get_password(KEYRING_SERVICE_NAME_CLI, KEY_ACCESS_TOKEN)
-                    if token:
-                        self.access_token = token
-                        print("Loaded saved CLI session token.")
-                        return True
-            except Exception as e: # Catching broader exceptions from keyring is safer
-                print(f"Could not load CLI token from keyring: {e}")
+                token = self.keychain_manager.load_token(self.email)
+                if token:
+                    self.access_token = token
+                    print("Loaded saved CLI session token.")
+                    return True
+            except Exception as e:
+                print(f"Could not load CLI token from keychain: {e}")
         return False
 
     def _save_token(self, token):
-        """Saves access token to keyring for the current email."""
+        """Saves access token to keychain_manager for the current email."""
         if self.email and token:
             try:
-                keyring.set_password(KEYRING_SERVICE_NAME_CLI, KEY_USER_EMAIL, self.email)
-                keyring.set_password(KEYRING_SERVICE_NAME_CLI, KEY_ACCESS_TOKEN, token)
+                self.keychain_manager.save_token(self.email, token)
                 print("Session token saved.")
             except Exception as e:
-                print(f"Could not save token to keyring: {e}")
+                print(f"Could not save token to keychain: {e}")
 
     def _clear_token(self):
-        """Clears access token from keyring and instance."""
-        try:
-            # Check if keys exist before attempting to delete
-            if keyring.get_password(KEYRING_SERVICE_NAME_CLI, KEY_USER_EMAIL):
-                 keyring.delete_password(KEYRING_SERVICE_NAME_CLI, KEY_USER_EMAIL)
-            if keyring.get_password(KEYRING_SERVICE_NAME_CLI, KEY_ACCESS_TOKEN):
-                keyring.delete_password(KEYRING_SERVICE_NAME_CLI, KEY_ACCESS_TOKEN)
-            self.access_token = None
-            print("Saved session token cleared.")
-        except Exception as e:
-            print(f"Error clearing token from keyring: {e}")
+        """Clears access token from keychain_manager and instance."""
+        if self.email:
+            try:
+                self.keychain_manager.clear_token(self.email)
+                self.access_token = None
+                print("Saved session token cleared for current user.")
+            except Exception as e:
+                print(f"Error clearing token from keychain: {e}")
+        else:
+            # If email is not available on this client instance,
+            # we might want to clear the "last used" token if that's relevant,
+            # or indicate that an email is needed.
+            # For now, matches previous behavior of needing an email.
+            print("Email context needed to clear specific token.")
+
 
     def clear_saved_session(self):
-        """Public method to clear the session."""
+        """Public method to clear the session for the current client's email."""
         self._clear_token()
 
     def _make_request(self, method, endpoint, headers=None, json_data=None, params=None):
