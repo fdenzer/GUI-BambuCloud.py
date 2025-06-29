@@ -1,0 +1,190 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]  # Trigger on version tags (e.g., v1.0.0)
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            asset_name: "bambu_gui_app-Linux-x86_64.AppImage"
+            pyinstaller_os_args: "--onefile"
+          - os: windows-latest
+            asset_name: "bambu_gui_app-Windows-x86_64.exe"
+            pyinstaller_os_args: "--onefile --windowed"
+          - os: macos-latest
+            asset_name: "bambu_gui_app-macOS.app.zip"
+            pyinstaller_os_args: "--onedir --windowed --osx-bundle-identifier com.example.bambustatusapp"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x' # Use a recent Python 3 version
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller -r requirements.txt
+
+    - name: Install AppImage tools (Linux only)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse2
+        wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+        chmod +x appimagetool-x86_64.AppImage
+        sudo mv appimagetool-x86_64.AppImage /usr/local/bin/appimagetool
+
+    - name: Create placeholder bambu_cli.py if not exists
+      shell: bash # Use bash for consistency in this step
+      run: |
+        if [ ! -f bambu_cli.py ]; then
+          echo "Creating placeholder bambu_cli.py"
+          cat <<EOF > bambu_cli.py
+        class BambuClient:
+            def __init__(self, email=None, serial_number=None, password=None):
+                self.email = email
+                self.serial_number = serial_number
+                self.password = password
+                self.access_token = None
+                print(f"Placeholder BambuClient initialized for {email}, serial {serial_number}")
+
+            def login(self):
+                print("Placeholder: Attempting login...")
+                # Simulate needing 2FA sometimes for testing UI flow
+                # import random
+                # needs_2fa = random.choice([True, False])
+                # if needs_2fa and not self.password: # Simplified logic
+                #     print("Placeholder: Login requires 2FA.")
+                #     return False, True # logged_in, needs_2fa
+                if self.password: # Simulate successful login if password provided
+                    self.access_token = "fake_token"
+                    print("Placeholder: Login successful.")
+                    return True, False
+                print("Placeholder: Login failed (no password or other reason).")
+                return False, False
+
+
+            def login_with_2fa(self, tfa_code):
+                print(f"Placeholder: Attempting login with 2FA code {tfa_code}...")
+                if tfa_code == "123456":
+                    self.access_token = "fake_token_2fa"
+                    print("Placeholder: 2FA Login successful.")
+                    return True
+                print("Placeholder: 2FA Login failed.")
+                return False
+
+            def get_printer_status(self, serial):
+                print(f"Placeholder: Getting printer status for {serial}...")
+                if self.access_token:
+                    return {
+                        "dev_id": "placeholder_id",
+                        "dev_name": "Placeholder Printer",
+                        "dev_online": "true",
+                        "task_name": "Placeholder Task",
+                        "task_status": "running",
+                        "progress": "50%",
+                        "start_time": "sometime",
+                        "prediction": "1000"
+                    }
+                print("Placeholder: Not logged in, cannot get status.")
+                return None
+        EOF
+        fi
+
+    - name: Run PyInstaller
+      run: |
+        pyinstaller --noconfirm ${{ matrix.pyinstaller_os_args }} --name bambu_gui_app --hidden-import bambu_cli bambu_gui.py
+      # For macOS, PyInstaller with --windowed and --onedir should produce a .app bundle in dist/
+      # For Windows, it produces an .exe in dist/
+      # For Linux, it produces an executable in dist/
+
+    - name: Package AppImage (Linux only)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        # Create AppDir structure for AppImage
+        mkdir -p AppDir/usr/bin
+        cp dist/bambu_gui_app AppDir/usr/bin/
+        chmod +x AppDir/usr/bin/bambu_gui_app
+
+        # Copy AppRun from repository
+        cp scripts/linux/AppRun AppDir/
+        chmod +x AppDir/AppRun
+
+        # Copy desktop file from repository
+        cp scripts/linux/bambu_gui_app.desktop AppDir/
+
+        # Copy icon from repository
+        cp scripts/linux/bambu_icon.png AppDir/
+
+        # Use appimagetool to build the AppImage
+        appimagetool AppDir ${{ matrix.asset_name }}
+        
+        # Move AppImage to artifacts folder
+        mkdir -p artifacts
+        mv ${{ matrix.asset_name }} artifacts/
+
+    - name: Prepare Windows executable
+      if: matrix.os == 'windows-latest'
+      shell: bash # Use bash for consistency in renaming
+      run: |
+        mkdir -p artifacts
+        mv dist/bambu_gui_app.exe artifacts/${{ matrix.asset_name }}
+
+    - name: Package macOS .app
+      if: matrix.os == 'macos-latest'
+      run: |
+        cd dist
+        zip -r ${{ matrix.asset_name }} bambu_gui_app.app
+        mkdir -p ../artifacts
+        mv ${{ matrix.asset_name }} ../artifacts/
+        cd ..
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-assets-${{ matrix.os }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 7
+
+    - name: Download all artifacts
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: actions/download-artifact@v4
+      with:
+        path: release-assets/
+        pattern: release-assets-*
+        merge-multiple: true
+
+    - name: List release files (debug)
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: |
+        echo "Release files:"
+        find release-assets/ -type f -print0 | xargs -0 ls -la
+      shell: bash
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        files: release-assets/*
+        generate_release_notes: true
+        prerelease: false
+        draft: false
