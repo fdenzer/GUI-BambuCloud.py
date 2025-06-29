@@ -209,19 +209,98 @@ class BambuClient:
         # The API documentation implies /api/user/print returns status for all devices.
         # We need to filter by dev_id client-side.
         response = self._make_request("GET", "/v1/iot-service/api/user/print", params={"force": "true"})
+        device_initial_status = None
 
         if response and "devices" in response:
-            for device_status in response["devices"]:
-                if device_status.get("dev_id") == serial_number_to_find:
-                    return device_status
-            print(f"Status for printer with serial number {serial_number_to_find} not found.")
-            return None
-        elif response and "message" in response and response["message"] != "success":
-            print(f"Error getting printer status: {response['message']}")
+            for dev_status in response["devices"]:
+                if dev_status.get("dev_id") == serial_number_to_find:
+                    device_initial_status = dev_status
+                    break
+            if not device_initial_status:
+                print(f"Device with serial number {serial_number_to_find} not found in /api/user/print response.")
+                return None
+        elif response and "error" in response: # Handle structured error from _make_request
+            error_message = response.get("message", "Failed to retrieve initial device status")
+            print(f"Error getting initial device status: {error_message}")
             return None
         else:
-            print(f"Failed to get printer status. Response: {response}")
+            print(f"Failed to get initial printer status or unexpected response: {response}")
             return None
+
+        # If device is offline or no task details are expected from it directly, return initial status
+        if not device_initial_status.get("dev_online") or not device_initial_status.get("dev_id"):
+            return device_initial_status
+
+        # Device is online, try to get detailed task status from /my/tasks
+        print(f"Device {serial_number_to_find} is online. Fetching detailed tasks...")
+        tasks_response = self._make_request("GET", "/v1/user-service/my/tasks", params={"deviceId": serial_number_to_find})
+
+        if tasks_response and "hits" in tasks_response:
+            active_task_details = None
+            for task in tasks_response["hits"]:
+                # Assuming 'status: 2' means currently printing as per Gist observation.
+                # The Gist also mentions: "if endTime is within a minute of startTime, that means the file is currently printing"
+                # We'll primarily rely on a status indicator if available, or startTime/endTime logic.
+                # For now, let's assume a status field like `task_status` from the device or a specific `status` from the task.
+                # The Gist shows task["status"] == 2. Let's use that.
+                # Also ensure task["deviceId"] matches our device.
+                if task.get("deviceId") == serial_number_to_find and task.get("status") == 2: # 2 seems to be 'printing'
+                    # Check the startTime/endTime logic as a fallback or confirmation
+                    # The Gist says: "if endTime is within a minute of startTime, that means the file is currently printing"
+                    # This seems more like a way to identify tasks that *just started* or are *about to start* if 'status' isn't definitive.
+                    # Let's prioritize a direct status field. If task.get("status") == 2 is reliable, we use it.
+                    active_task_details = task
+                    break # Found the active task
+
+            if active_task_details:
+                print(f"Found active task: {active_task_details.get('title', 'N/A')}")
+                # Augment the initial device status with details from the active task
+                # The GUI expects 'task_name', 'task_status', 'progress', 'start_time', 'prediction'
+                device_initial_status['task_name'] = active_task_details.get('title', 'N/A')
+                # The task's 'status' field (e.g., 2) might be numeric. The GUI might expect a string.
+                # For now, let's pass it as is and see how the GUI handles it or adjust later.
+                # It's better to map it to a human-readable string if possible.
+                # Based on user output: "Task Status: N/A" but printer is printing.
+                # The API might use different terms. Gist for /api/user/print shows "task_status": null.
+                # Gist for /my/tasks shows "status": 2.
+                # Let's try to map status 2 to something like "Printing"
+                task_status_map = {
+                    0: "Unknown", # Placeholder
+                    1: "Preparing", # Placeholder
+                    2: "Printing", # Based on Gist observation for active task
+                    3: "Paused", # Placeholder
+                    4: "Completed", # Placeholder
+                    5: "Failed", # Placeholder
+                }
+                device_initial_status['task_status'] = task_status_map.get(active_task_details.get('status'), 'N/A')
+
+                device_initial_status['start_time'] = active_task_details.get('startTime', 'N/A')
+                # 'costTime' from /my/tasks is total print duration in seconds. This is our 'prediction'.
+                device_initial_status['prediction'] = active_task_details.get('costTime', 'N/A')
+
+                # Calculate progress if possible
+                # Progress = ((current_time - start_time_seconds) / total_duration_seconds) * 100
+                # This will be handled in the GUI as it has access to current time and can format.
+                # For now, we can pass the raw values needed for calculation.
+                # The GUI currently expects a 'progress' field. If not directly available, we might need to calculate it here
+                # or ensure the GUI can derive it. The Gist for /api/user/print has "progress": null.
+                # The Gist for /my/tasks does not have a 'progress' field.
+                # Let's set it to 'N/A' here and let GUI handle calculation if it can.
+                device_initial_status['progress'] = 'N/A' # Or calculate if feasible here.
+
+                return device_initial_status
+            else:
+                print(f"No currently active task found for {serial_number_to_find} in /my/tasks.")
+                # Return the initial status, which will show N/A for task details
+                return device_initial_status
+        elif tasks_response and "error" in tasks_response:
+            error_message = tasks_response.get("message", "Failed to retrieve tasks")
+            print(f"Error fetching tasks for {serial_number_to_find}: {error_message}")
+            # Fallback to initial status; it's better than returning None if the device info is available
+            return device_initial_status
+        else:
+            print(f"Failed to retrieve tasks or unexpected response for {serial_number_to_find}: {tasks_response}")
+            return device_initial_status
 
 def main():
     parser = argparse.ArgumentParser(description="Bambu Lab Printer Status CLI")

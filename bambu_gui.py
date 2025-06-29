@@ -617,35 +617,79 @@ class BambuStatusApp:
                     status_pretty += f"  Online: {status.get('dev_online', 'N/A')}\n"
                     status_pretty += f"  Task Name: {status.get('task_name', 'N/A')}\n"
                     status_pretty += f"  Task Status: {status.get('task_status', 'N/A')}\n"
-                    status_pretty += f"  Progress: {status.get('progress', 'N/A')}\n"
-                    status_pretty += f"  Start Time: {status.get('start_time', 'N/A')}\n"
-                    prediction = status.get('prediction', None)
-                    start_time = status.get('start_time', None)
-                    if prediction is not None and start_time not in (None, 'N/A'):
-                        import datetime
+
+                    start_time_str = status.get('start_time', None)
+                    prediction_total_seconds_str = status.get('prediction', None) # This is total duration from API ('costTime')
+                    progress_percentage_str = status.get('progress', 'N/A') # Default to N/A
+
+                    import datetime
+
+                    if start_time_str and start_time_str != 'N/A' and \
+                       prediction_total_seconds_str and prediction_total_seconds_str != 'N/A':
                         try:
-                            if isinstance(start_time, str):
-                                try: st_dt = datetime.datetime.fromisoformat(start_time)
-                                except Exception: st_dt = datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-                            else: st_dt = start_time
+                            # Parse start_time (supports ISO format like "2022-11-22T01:58:10Z" or "YYYY-MM-DD HH:MM:SS")
+                            if 'Z' in start_time_str:
+                                st_dt = datetime.datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                                # Convert to local timezone if it's naive, or ensure it's aware for correct calculations
+                                # For simplicity, let's assume UTC and convert to local for display if needed,
+                                # but calculations are fine with consistent aware objects.
+                                # Python's fromisoformat on 'Z' makes it timezone-aware (UTC).
+                            elif 'T' in start_time_str: # ISO without Z
+                                st_dt = datetime.datetime.fromisoformat(start_time_str)
+                            else: # Fallback for "YYYY-MM-DD HH:MM:SS"
+                                st_dt = datetime.datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
+                                # Make it system-timezone aware if parsed as naive
+                                st_dt = st_dt.replace(tzinfo=datetime.timezone.utc).astimezone(tz=None) if st_dt.tzinfo is None else st_dt
 
-                            try: prediction_seconds = int(float(prediction))
-                            except ValueError: raise ValueError("Prediction value is not a valid number.")
 
-                            target_time = st_dt + datetime.timedelta(seconds=prediction_seconds)
-                            status_pretty += f"  Target End Time: {target_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            duration_obj = datetime.timedelta(seconds=prediction_seconds)
+                            prediction_total_seconds = int(float(prediction_total_seconds_str))
 
-                            days = duration_obj.days
-                            secs_remainder = duration_obj.seconds
-                            hours = secs_remainder // 3600
-                            minutes = (secs_remainder % 3600) // 60
-                            seconds = secs_remainder % 60
-                            status_pretty += f"  Remaining (dd:hh:mm:ss): {days:02}:{hours:02}:{minutes:02}:{seconds:02}\n"
+                            # Calculate Progress
+                            now_utc = datetime.datetime.now(datetime.timezone.utc)
+                            st_dt_utc = st_dt.astimezone(datetime.timezone.utc) # Ensure start_time is UTC for comparison
+
+                            elapsed_seconds = (now_utc - st_dt_utc).total_seconds()
+                            if elapsed_seconds < 0: elapsed_seconds = 0 # Print hasn't started according to time sync
+
+                            if prediction_total_seconds > 0:
+                                current_progress = (elapsed_seconds / prediction_total_seconds) * 100
+                                progress_percentage_str = f"{min(max(current_progress, 0), 100):.2f}%" # Clamp between 0 and 100
+                            else: # Avoid division by zero if prediction is 0
+                                progress_percentage_str = "0.00%" if elapsed_seconds >=0 else "N/A"
+
+
+                            status_pretty += f"  Progress: {progress_percentage_str}\n"
+                            status_pretty += f"  Start Time: {st_dt.strftime('%Y-%m-%d %H:%M:%S %Z%z')}\n" # Show timezone
+
+                            # Calculate Remaining Time and Target End Time
+                            remaining_seconds = prediction_total_seconds - elapsed_seconds
+                            if remaining_seconds < 0: remaining_seconds = 0
+
+                            target_time_utc = st_dt_utc + datetime.timedelta(seconds=prediction_total_seconds)
+                            target_time_local = target_time_utc.astimezone(tz=None)
+                            status_pretty += f"  Target End Time: {target_time_local.strftime('%Y-%m-%d %H:%M:%S %Z%z')}\n"
+
+                            # Format remaining time as dd:hh:mm:ss
+                            days_rem, secs_rem_total = divmod(int(remaining_seconds), 86400) # 86400 seconds in a day
+                            hours_rem, secs_rem_total = divmod(secs_rem_total, 3600)
+                            mins_rem, secs_rem = divmod(secs_rem_total, 60)
+                            status_pretty += f"  Remaining (dd:hh:mm:ss): {days_rem:02d}:{hours_rem:02d}:{mins_rem:02d}:{secs_rem:02d}\n"
+                            status_pretty += f"  Total Duration (s): {prediction_total_seconds}\n"
+
+
+                        except ValueError as ve:
+                            status_pretty += f"  Progress: {progress_percentage_str}\n" # Show N/A or last value if error
+                            status_pretty += f"  Start Time: {start_time_str}\n"
+                            status_pretty += f"  Prediction (s): {prediction_total_seconds_str} (Error parsing time/prediction: {ve})\n"
                         except Exception as e:
-                            status_pretty += f"  Prediction (s): {prediction} (error formatting time: {e})\n"
-                    else:
-                        status_pretty += f"  Prediction (s): {status.get('prediction', 'N/A')}\n"
+                            status_pretty += f"  Progress: {progress_percentage_str}\n"
+                            status_pretty += f"  Start Time: {start_time_str}\n"
+                            status_pretty += f"  Prediction (s): {prediction_total_seconds_str} (Error formatting time: {e})\n"
+                    else: # If start_time or prediction is N/A
+                        status_pretty += f"  Progress: {progress_percentage_str}\n" # Usually N/A if dependent data missing
+                        status_pretty += f"  Start Time: {status.get('start_time', 'N/A')}\n"
+                        status_pretty += f"  Prediction (s): {status.get('prediction', 'N/A')} (total duration)\n"
+
                     self.root.after(0, lambda s=status_pretty: self._set_status_display(s))
                     self.root.after(0, lambda: self._set_log_message("Printer status updated.", append=True))
 
