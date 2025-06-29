@@ -103,6 +103,11 @@ class BambuStatusApp:
         # Initial attempt to load session and populate fields
         self._try_load_session()
 
+        # Inform about API logging
+        log_file_pattern = "bambu_api_log_YYYYMMDD_HHMMSS.txt"
+        self._set_log_message(f"Note: API requests and responses are being logged to files named like '{log_file_pattern}' in the application's directory for debugging purposes.", append=True)
+
+
     # Removed old _set_status method
 
     def _set_log_message(self, message, append=True, is_error=False):
