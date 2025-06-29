@@ -184,3 +184,13 @@ Key endpoints used:
 ## License
 (Placeholder - assuming MIT based on typical GitHub projects, but refers to LICENSE file if present)
 This project is licensed under the terms of the LICENSE file.
+
+## Debugging
+
+**API Logging:**
+For debugging purposes, both the CLI and GUI tools now automatically log all API requests and their full responses.
+*   **Log Files:** These logs are saved to files named `bambu_api_log_YYYYMMDD_HHMMSS.txt` in the directory from which the script is run.
+*   **Content:** Logs include the request URL, redacted headers (Authorization token is not shown), request parameters/body, response status code, response headers, and the full response body (JSON or raw text).
+*   **Purpose:** This is intended to help diagnose issues with API communication or unexpected responses from the Bambu Lab cloud service.
+*   **Sensitivity:** Please be aware that these logs will contain your device ID and other non-credential details related to your printer and account. Do not share these logs publicly if you are concerned about this information. The access token itself is redacted from the logged headers.
+*   **GUI Notification:** The GUI application will show a message in its log panel upon startup, reminding you that API logging is active.
