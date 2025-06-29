@@ -5,7 +5,6 @@ from bambu_cli import BambuClient # Assuming bambu_cli.py is in the same directo
 import os
 from dotenv import load_dotenv
 import keyring # For saving credentials
-import json # Potentially for storing all creds under one key, though not the primary plan
 
 # --- Keyring Constants ---
 KEYRING_SERVICE_NAME = "BambuStudioHelper_GUI"
@@ -26,6 +25,17 @@ class BambuStatusApp:
         self.client = None
         self.login_requires_2fa = False
         self.active_session_loaded_from_keyring = False # Track if current session is from keyring
+
+        # --- In-memory cache for credentials ---
+        self.cached_email = None
+        self.cached_serial = None
+        self.cached_password = None
+        self.cached_token = None
+        self.cached_token_email = None # Email associated with the cached token
+        # Flag to indicate if keyring was successfully accessed for loading in this session,
+        # to prevent re-prompting if "Always Allow" was chosen.
+        self.keyring_load_attempted_in_session = False
+        # --- End of cache variables ---
 
         # Style
         style = ttk.Style()
@@ -313,34 +323,85 @@ class BambuStatusApp:
 
             if token_to_save: # Always save token if one is provided (means successful login)
                 keyring.set_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI, token_to_save)
-                if email: keyring.set_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email", email)
+                self.cached_token = token_to_save # Update cache
+                if email:
+                    keyring.set_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email", email)
+                    self.cached_token_email = email # Update cache
+
+            # Update cache for other credentials if they were part of the save operation
+            if self.save_creds_var.get():
+                if email: self.cached_email = email
+                if serial: self.cached_serial = serial
+                if password: self.cached_password = password
+            else: # If save_creds was off, these specific items might have been deleted from keyring
+                  # but we only clear the main password from cache. Email/serial might still be useful if token exists.
+                self.cached_password = None
+                # Token cache is handled above. Email/Serial cache remains as is,
+                # as they might be unsaved but still used with a loaded token.
+
+            # After any save operation, the keyring has been interacted with,
+            # potentially changing its state from what was last loaded.
+            # Forcing a re-evaluation of keyring state if _load_credentials_and_token is called next.
+            # However, if we just saved, the cache should be up-to-date.
+            # Let's assume keyring_load_attempted_in_session means "cache is representative of one load attempt"
+            # and saving TO keyring means our cache is now the most current representation.
+            # self.keyring_load_attempted_in_session = True # It's already true if we loaded, and saving makes cache valid.
+
+
             return True
         except Exception as e:
-            self.root.after(0, lambda: self._set_log_message(f"Error saving data: {e}", is_error=True, append=True))
+            self.root.after(0, lambda: self._set_log_message(f"Error saving data to keyring: {e}", is_error=True, append=True))
             return False
 
     def _load_credentials_and_token(self):
+        if self.keyring_load_attempted_in_session:
+            return {
+                "email": self.cached_email,
+                "serial": self.cached_serial,
+                "password": self.cached_password,
+                "token": self.cached_token,
+                "token_email": self.cached_token_email
+            }
+
         try:
             email = keyring.get_password(KEYRING_SERVICE_NAME, KEY_EMAIL)
             serial = keyring.get_password(KEYRING_SERVICE_NAME, KEY_SERIAL)
             # Load password only if "save credentials" would have been true for it
-            # This means we check if email (primary key for saved creds) exists.
             password = keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD) if email else None
-
             token = keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
             token_email = keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
 
             # If a token exists with an associated email, and the main email field is empty or different,
-            # prefer the token's email. This handles cases where token is valid but user changed email field.
+            # prefer the token's email.
             if token and token_email and (not email or email != token_email):
-                email = token_email
+                self.cached_email = token_email # Update cache if we override email based on token
+            else:
+                self.cached_email = email
 
-            return {"email": email, "serial": serial, "password": password, "token": token, "token_email": token_email}
+            self.cached_serial = serial
+            self.cached_password = password # This will be None if email wasn't found, which is correct
+            self.cached_token = token
+            self.cached_token_email = token_email # Store original token_email from keyring
+
+            self.keyring_load_attempted_in_session = True # Mark that we've done the keyring access
+
+            return {
+                "email": self.cached_email, # Return the potentially token-adjusted email
+                "serial": self.cached_serial,
+                "password": self.cached_password,
+                "token": self.cached_token,
+                "token_email": self.cached_token_email # Return the original token_email
+            }
         except Exception as e:
-            # This method is called during __init__, so UI might not be fully ready for self.root.after
-            # For now, let's assume direct call is okay or error is minor enough not to block UI init.
-            # If issues arise, this might need a flag or a queue for early messages.
-            self._set_log_message(f"Error loading saved data: {e}", is_error=True, append=True)
+            self._set_log_message(f"Error loading saved data from keyring: {e}", is_error=True, append=True)
+            # Even on error, mark as attempted to avoid re-prompting loops within the same session
+            self.keyring_load_attempted_in_session = True
+            # Clear cache on error to ensure no stale/partial data is used
+            self.cached_email = None
+            self.cached_serial = None
+            self.cached_password = None
+            self.cached_token = None
+            self.cached_token_email = None
             return {"email": None, "serial": None, "password": None, "token": None, "token_email": None}
 
     def _delete_credentials_and_token(self):
@@ -352,11 +413,20 @@ class BambuStatusApp:
             if keyring.get_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI): keyring.delete_password(KEYRING_SERVICE_NAME, KEY_ACCESS_TOKEN_GUI)
             if keyring.get_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email"): keyring.delete_password(KEYRING_SERVICE_NAME, f"{KEY_ACCESS_TOKEN_GUI}_email")
 
-            if self.client: self.client.access_token = None
+            if self.client: self.client.access_token = None # Clear token from active client
             self.active_session_loaded_from_keyring = False
+
+            # Clear the cache
+            self.cached_email = None
+            self.cached_serial = None
+            self.cached_password = None
+            self.cached_token = None
+            self.cached_token_email = None
+            self.keyring_load_attempted_in_session = False # Allow next load to hit keyring
+
             return True
         except Exception as e:
-            self.root.after(0, lambda: self._set_log_message(f"Error deleting saved data: {e}", is_error=True, append=True))
+            self.root.after(0, lambda: self._set_log_message(f"Error deleting saved data from keyring: {e}", is_error=True, append=True))
             return False
 
     def _try_load_session(self):
@@ -371,11 +441,14 @@ class BambuStatusApp:
             self.serial_entry.delete(0, tk.END); self.serial_entry.insert(0, serial)
             populated_from_keyring = True
 
-        # Set "Save Credentials" checkbox state based on whether a password was actually stored with the email
-        if email and keyring.get_password(KEYRING_SERVICE_NAME, KEY_PASSWORD):
+        # Set "Save Credentials" checkbox state based on whether a password was loaded from keyring.
+        # data["password"] from _load_credentials_and_token() will be non-None if a password
+        # was successfully retrieved from keyring (which itself depends on email being present).
+        if data.get("email") and data.get("password"):
             self.save_creds_var.set(True)
-            if password: # password from _load_credentials_and_token already respects this
-                 self.password_entry.delete(0, tk.END); self.password_entry.insert(0, password)
+            # 'password' here is data.get("password") from the loaded credentials
+            if data.get("password"):
+                 self.password_entry.delete(0, tk.END); self.password_entry.insert(0, data.get("password"))
         else:
             self.save_creds_var.set(False)
             self.password_entry.delete(0, tk.END) # Clear field if not saving password
@@ -411,8 +484,12 @@ class BambuStatusApp:
             # We only definitively save credentials (specifically password) upon a successful login.
             # However, we can save email/serial now if they exist.
             # The act of checking the box means "I want to save these next time I log in successfully"
-            if email: keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
-            if serial: keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
+            if email:
+                keyring.set_password(KEYRING_SERVICE_NAME, KEY_EMAIL, email)
+                self.cached_email = email # Update cache
+            if serial:
+                keyring.set_password(KEYRING_SERVICE_NAME, KEY_SERIAL, serial)
+                self.cached_serial = serial # Update cache
             # Password itself is only saved via _save_credentials_and_token after login.
             self.password_entry.config(state=tk.DISABLED if self.active_session_loaded_from_keyring else tk.NORMAL)
             self._set_log_message("Credentials will be stored securely on next successful login.", append=True)
