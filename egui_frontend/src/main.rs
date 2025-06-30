@@ -492,6 +492,10 @@ impl App for MyApp {
 // Main function remains largely the same but uses the new MyApp
 fn main() -> Result<(), eframe::Error> {
     env_logger::init(); // Initialize logger
+    if std::env::var("RUST_LOG").is_err() {
+        // Default to debug if not set
+        std::env::set_var("RUST_LOG", "debug");
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 700.0]),
         ..Default::default()

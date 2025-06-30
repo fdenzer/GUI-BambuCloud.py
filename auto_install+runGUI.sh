@@ -1,4 +1,5 @@
 #!/bin/bash
+set -x
 
 # Script to build and run the Rust Egui Bambu Lab Client
 # Attempts to install Rust/Cargo and common Egui dependencies on Debian/Ubuntu if not found.
