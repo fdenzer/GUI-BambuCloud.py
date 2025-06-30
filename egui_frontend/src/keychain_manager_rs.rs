@@ -1,4 +1,4 @@
-use keyring_rs::Keyring;
+use keyring::Keyring; // Only import Keyring struct
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use log::{error, info, warn}; // Added for logging
@@ -23,7 +23,7 @@ struct KeychainData {
 pub struct KeychainManagerRs {
     service_name: String,
     account_name: String,
-    keyring: Keyring,
+    keyring: Keyring<'static>, // Correct for iffyio/keyring-rs
 }
 
 impl KeychainManagerRs {
@@ -32,7 +32,6 @@ impl KeychainManagerRs {
         Self {
             service_name: SHARED_KEYRING_SERVICE_NAME.to_string(),
             account_name: KEYCHAIN_DATA_ACCOUNT_NAME.to_string(),
-            // Keyring is created with service_name as the "service" and account_name as the "user" for the entry.
             keyring: Keyring::new(SHARED_KEYRING_SERVICE_NAME, KEYCHAIN_DATA_ACCOUNT_NAME),
         }
     }
@@ -52,13 +51,13 @@ impl KeychainManagerRs {
                         })
                 }
             }
-            Err(keyring_rs::Error::NoPasswordFound) => {
+            Err(keyring::Error::NoEntry) => { // Correct for iffyio/keyring-rs
                 info!("No password found in keychain for service '{}', account '{}'. Returning default KeychainData.", self.service_name, self.account_name);
                 Ok(KeychainData::default())
             }
             Err(e) => {
-                error!("Error loading from keychain for service '{}', account '{}': {}", self.service_name, self.account_name, e);
-                Err(format!("Error loading from keychain: {}", e))
+                error!("Error loading from keychain for service '{}', account '{}': {:?}", self.service_name, self.account_name, e); // Changed to {:?} for e
+                Err(format!("Error loading from keychain: {:?}", e)) // Changed to {:?} for e
             }
         }
     }
@@ -71,8 +70,8 @@ impl KeychainManagerRs {
             })?;
         self.keyring.set_password(&json_blob)
             .map_err(|e| {
-                error!("Error saving to keychain for service '{}', account '{}': {}", self.service_name, self.account_name, e);
-                format!("Error saving to keychain: {}", e)
+                error!("Error saving to keychain for service '{}', account '{}': {:?}", self.service_name, self.account_name, e); // Changed to {:?} for e
+                format!("Error saving to keychain: {:?}", e) // Changed to {:?} for e
             })?;
         info!("Successfully saved data to keychain for service '{}', account '{}'.", self.service_name, self.account_name);
         Ok(())
@@ -158,13 +157,13 @@ impl KeychainManagerRs {
                 info!("All keychain data cleared for service '{}', account '{}'.", self.service_name, self.account_name);
                 Ok(())
             }
-            Err(keyring_rs::Error::NoPasswordFound) => {
+            Err(keyring::Error::NoEntry) => { // Correct for iffyio/keyring-rs
                 info!("No keychain data found to clear for service '{}', account '{}'.", self.service_name, self.account_name);
                 Ok(()) // Not an error if it wasn't there
             }
             Err(e) => {
-                error!("Error deleting keychain entry for service '{}', account '{}': {}", self.service_name, self.account_name, e);
-                Err(format!("Error deleting keychain entry: {}", e))
+                error!("Error deleting keychain entry for service '{}', account '{}': {:?}", self.service_name, self.account_name, e); // Changed to {:?} for e
+                Err(format!("Error deleting keychain entry: {:?}", e)) // Changed to {:?} for e
             }
         }
     }

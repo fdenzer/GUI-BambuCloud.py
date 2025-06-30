@@ -1,20 +1,20 @@
 use reqwest::{Client, header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE}};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap; // If needed for some responses
-use log::{debug, error, info, warn};
+use std::collections::HashMap; // Restoring import, warning was likely incorrect
+use log::{info, warn}; // Removed debug, error as per warning
 use chrono::{DateTime, Utc, TimeZone, NaiveDateTime, SecondsFormat}; // For parsing time strings
 
 const API_BASE_URL: &str = "https://api.bambulab.com";
 
 // --- Request Structs ---
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct LoginRequest<'a> {
     account: &'a str,
     password: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct Login2FARequest<'a> {
     account: &'a str,
     code: &'a str,
@@ -207,7 +207,7 @@ impl BambuApiClientRs {
         }
     }
 
-    async fn log_api_request_debug<T: Serialize + std.fmt::Debug>(
+    async fn log_api_request_debug<T: Serialize + std::fmt::Debug>(
         method: &str,
         url: &str,
         headers: &HeaderMap,
@@ -224,12 +224,12 @@ impl BambuApiClientRs {
             log_headers_map.insert(AUTHORIZATION.as_str().to_string(), "[REDACTED]".to_string());
         }
 
-        debug!("API Request: {} {}", method, url);
-        debug!("API Headers: {:?}", log_headers_map);
+        log::debug!("API Request: {} {}", method, url);
+        log::debug!("API Headers: {:?}", log_headers_map);
         if let Some(body) = json_body {
             match serde_json::to_string_pretty(body) {
-                Ok(pretty_body) => debug!("API Request Body:\n{}", pretty_body),
-                Err(_) => debug!("API Request Body (raw): {:?}", body),
+                Ok(pretty_body) => log::debug!("API Request Body:\n{}", pretty_body),
+                Err(_) => log::debug!("API Request Body (raw): {:?}", body),
             }
         }
     }
@@ -237,23 +237,23 @@ impl BambuApiClientRs {
     async fn log_api_response_debug(response_status: reqwest::StatusCode, response_headers: &HeaderMap, text_body: &str) {
         if log::max_level() < log::LevelFilter::Debug { return; }
 
-        debug!("API Response Status: {}", response_status);
-        let mut log_headers_map = HashMap::new();
+        log::debug!("API Response Status: {}", response_status);
+        let mut log_headers_map = HashMap::new(); // Using imported HashMap
          for (name, value) in response_headers.iter() {
             log_headers_map.insert(name.as_str().to_string(), value.to_str().unwrap_or("[REDACTED]").to_string());
         }
-        debug!("API Response Headers: {:?}", log_headers_map);
+        log::debug!("API Response Headers: {:?}", log_headers_map);
 
         match serde_json::from_str::<serde_json::Value>(text_body) {
             Ok(json_val) => match serde_json::to_string_pretty(&json_val) {
-                Ok(pretty_json) => debug!("API Response Body:\n{}", pretty_json),
-                Err(_) => debug!("API Response Body (raw text, pretty print failed): {}", text_body),
+                Ok(pretty_json) => log::debug!("API Response Body:\n{}", pretty_json),
+                Err(_) => log::debug!("API Response Body (raw text, pretty print failed): {}", text_body),
             },
-            Err(_) => debug!("API Response Body (not JSON): {}", text_body),
+            Err(_) => log::debug!("API Response Body (not JSON): {}", text_body),
         }
     }
 
-    async fn make_request_base<T: Serialize, R: for<'de> Deserialize<'de>>(
+    async fn make_request_base<T: Serialize + std::fmt::Debug, R: for<'de> Deserialize<'de>>(
         &self,
         method: reqwest::Method,
         endpoint: &str,
@@ -293,11 +293,11 @@ impl BambuApiClientRs {
             };
 
             if response_status == reqwest::StatusCode::UNAUTHORIZED && !is_login {
-                 error!("API call unauthorized (401) for endpoint: {}. Token might be invalid.", endpoint);
+                 log::error!("API call unauthorized (401) for endpoint: {}. Token might be invalid.", endpoint);
                  // The caller should handle token clearing based on this error type
                  Err(ApiError::AuthError(api_message))
             } else {
-                error!("API call failed for {}: {} - {}", endpoint, response_status, api_message);
+                log::error!("API call failed for {}: {} - {}", endpoint, response_status, api_message);
                 Err(ApiError::HttpError{status: response_status, message: api_message, error_code: api_code})
             }
         }
