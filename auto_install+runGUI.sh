@@ -7,4 +7,5 @@ if [ -f .env.example ] && [ ! -s .env ]; then
   open -W .env
 fi
 
-python3 ./bambu_gui.py
+# no python3 ./bambu_gui.py on this branch!
+# TODO: run rust app
