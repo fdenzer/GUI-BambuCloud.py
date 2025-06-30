@@ -51,7 +51,7 @@ impl KeychainManagerRs {
                         })
                 }
             }
-            Err(keyring::Error::NoEntry) => { // Correct for iffyio/keyring-rs
+            Err(keyring::KeyringError::NoPasswordFound) => { // Correct for iffyio/keyring-rs
                 info!("No password found in keychain for service '{}', account '{}'. Returning default KeychainData.", self.service_name, self.account_name);
                 Ok(KeychainData::default())
             }
@@ -157,7 +157,7 @@ impl KeychainManagerRs {
                 info!("All keychain data cleared for service '{}', account '{}'.", self.service_name, self.account_name);
                 Ok(())
             }
-            Err(keyring::Error::NoEntry) => { // Correct for iffyio/keyring-rs
+            Err(keyring::KeyringError::NoPasswordFound) => { // Correct for iffyio/keyring-rs
                 info!("No keychain data found to clear for service '{}', account '{}'.", self.service_name, self.account_name);
                 Ok(()) // Not an error if it wasn't there
             }
