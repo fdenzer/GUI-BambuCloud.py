@@ -3,13 +3,13 @@
 use eframe::{egui, App, Frame};
 use tokio::runtime::Runtime;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use std::sync::{Arc, Mutex}; // For sharing data with threads if needed, though mpsc is often better for results
+use std::sync::{Arc}; // For sharing data with threads if needed, though mpsc is often better for results
 
 mod keychain_manager_rs;
 use keychain_manager_rs::{KeychainManagerRs, GuiCredentialsRs};
 
 mod bambu_api_client_rs;
-use bambu_api_client_rs::{BambuApiClientRs, LoginResponse, DeviceStatus, ApiError};
+use bambu_api_client_rs::{BambuApiClientRs, DeviceStatus, ApiError};
 
 // Enum to represent messages sent from worker threads to the UI thread
 #[derive(Debug)]
@@ -138,8 +138,8 @@ impl MyApp {
                     else { None };
                     tx.send(AppMessage::KeychainLoadResult(token_to_try_opt, Some(gui_creds))).ok();
                 }
-                (Err(e_gui), _) => tx.send(AppMessage::Error(format!("Error loading GUI credentials: {}", e_gui))).ok(),
-                (_, Err(e_token_email)) => tx.send(AppMessage::Error(format!("Error loading last token email: {}", e_token_email))).ok(),
+                (Err(e_gui), _) => { tx.send(AppMessage::Error(format!("Error loading GUI credentials: {}", e_gui))).ok(); },
+                (_, Err(e_token_email)) => { tx.send(AppMessage::Error(format!("Error loading last token email: {}", e_token_email))).ok(); },
             }
         });
     }
@@ -165,7 +165,7 @@ impl MyApp {
         self.tokio_rt.spawn(async move {
             if let Some(token) = current_token { // Already have a token, try to get status
                 tx.send(AppMessage::Log(format!("Using existing token. Fetching status for {}...", serial))).ok();
-                match api_client_clone.get_printer_status(&serial, &token).await {
+                match (&*api_client_clone).get_printer_status(&serial, &token).await {
                     Ok(status_data) => {
                         tx.send(AppMessage::StatusUpdate(status_data)).ok();
                     }
@@ -183,7 +183,7 @@ impl MyApp {
                     return;
                 }
                 tx.send(AppMessage::Log(format!("Attempting login with 2FA for {}...", active_email_for_op))).ok();
-                 match api_client_clone.login_2fa(&active_email_for_op, &tfa_code).await {
+                 match (&*api_client_clone).login_2fa(&active_email_for_op, &tfa_code).await {
                     Ok(response) => {
                         if let Some(new_token) = response.access_token {
                             tx.send(AppMessage::LoginSuccess { email: active_email_for_op, token: new_token, from_keychain: false }).ok();
@@ -201,7 +201,7 @@ impl MyApp {
                     return;
                 }
                 tx.send(AppMessage::Log(format!("Attempting login for {}...", email))).ok();
-                match api_client_clone.login(&email, &password).await {
+                match (&*api_client_clone).login(&email, &password).await {
                     Ok(response) => {
                         if let Some(new_token) = response.access_token {
                             tx.send(AppMessage::LoginSuccess { email: email.clone(), token: new_token, from_keychain: false }).ok();
@@ -308,7 +308,7 @@ impl MyApp {
                 self.login_requires_2fa = false; // Reset 2FA state on failure
                 self.is_loading = false;
             }
-            Ok(AppMessage::StatusUpdate(mut status_data)) => {
+            Ok(AppMessage::StatusUpdate(status_data)) => {
                 self.add_log("Printer status updated.".to_string());
                 // status_data.calculate_derived_fields(); // Calculation done in API client now
                 self.status_display = Some(status_data);
@@ -361,7 +361,7 @@ impl MyApp {
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => { /* No message, do nothing */ }
-            Err(std.sync::mpsc::TryRecvError::Disconnected) => {
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 panic!("AppMessage channel disconnected!");
             }
         }
@@ -385,17 +385,17 @@ impl App for MyApp {
                 ui.label("Credentials & Printer");
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.label("Email:").with_new_line(false);
+                    ui.label("Email:");
                     ui.add_enabled(!self.is_loading && self.access_token.is_none(),
                         egui::TextEdit::singleline(&mut self.email_input).hint_text("Enter email"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Password:").with_new_line(false);
+                    ui.label("Password:");
                      ui.add_enabled(!self.is_loading && self.access_token.is_none(),
                         egui::TextEdit::singleline(&mut self.password_input).password(true).hint_text("Enter password"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Serial Number:").with_new_line(false);
+                    ui.label("Serial Number:");
                     ui.add_enabled(!self.is_loading && self.access_token.is_none(),
                         egui::TextEdit::singleline(&mut self.serial_input).hint_text("Enter serial"));
                 });
@@ -426,7 +426,7 @@ impl App for MyApp {
                  egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.label("Two-Factor Authentication");
                     ui.horizontal(|ui| {
-                        ui.label("2FA Code:").with_new_line(false);
+                        ui.label("2FA Code:");
                         ui.add_enabled(!self.is_loading, egui::TextEdit::singleline(&mut self.tfa_input).hint_text("Enter 2FA code"));
                     });
                 });
