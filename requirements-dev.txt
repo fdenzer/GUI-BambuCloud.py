@@ -1,4 +1,1 @@
-# Development dependencies
-# Install with: pip install -r requirements-dev.txt
-
-types-tkinter>=8.6.12  # Type stubs for Tkinter
+# All Python development dependencies have been removed.
