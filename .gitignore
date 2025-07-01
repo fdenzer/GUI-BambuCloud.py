@@ -207,3 +207,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .DS_store
+bambu_api_log*.txt
